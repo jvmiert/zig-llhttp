@@ -1,0 +1,11 @@
+.{
+    .name = "zig-llhttp",
+    .paths = .{""},
+    .version = "0.0.1",
+    .dependencies = .{
+        .llhttp = .{
+            .url = "https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.1.3.tar.gz",
+            .hash = "122059b75b8a34f74404daa4d3df9d08937d9435f60108daf7c94c6b818b31d815ba",
+        }
+    }
+}

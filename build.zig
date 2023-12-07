@@ -15,6 +15,8 @@ pub fn build(b: *std.Build) void {
     lib.linkLibC();
 
     lib.addIncludePath(llhttp.path("include"));
+    const header_path = llhttp.path("include/llhttp.h").getPath(b);
+    lib.installHeader(header_path, "llhttp.h");
 
     const csources = [_][]const u8{
         "api.c",

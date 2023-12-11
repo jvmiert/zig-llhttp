@@ -5,93 +5,186 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.llhttp);
 
-pub const llhttp_cb = ?*const fn (*const c.llhttp_t) callconv(.C) c_int;
-pub const llhttp_data_cb = ?*const fn (*const c.llhttp_t, [*c]const u8, usize) callconv(.C) c_int;
+const Callbacks = enum {
+    on_message_begin,
+    on_headers_complete,
+
+    on_message_complete,
+    on_url_complete,
+    on_status_complete,
+    on_method_complete,
+    on_version_complete,
+    on_header_field_complete,
+    on_header_value_complete,
+    on_chunk_extension_name_complete,
+    on_chunk_extension_value_complete,
+
+    on_chunk_header,
+    on_chunk_complete,
+    on_reset,
+};
+
+const DataCallbacks = enum {
+    on_url,
+    on_status,
+    on_method,
+    on_version,
+    on_header_field,
+    on_header_value,
+    on_chunk_extension_name,
+    on_chunk_extension_value,
+    on_body,
+};
 
 pub const LlhttpParserType = enum { both, request, response };
 
-pub const struct_llhttp_settings_s = extern struct {
-    on_message_begin: llhttp_cb = null,
-    on_url: llhttp_data_cb = null,
-    on_status: llhttp_data_cb = null,
-    on_method: llhttp_data_cb = null,
-    on_version: llhttp_data_cb = null,
-    on_header_field: llhttp_data_cb = null,
-    on_header_value: llhttp_data_cb = null,
-    on_chunk_extension_name: llhttp_data_cb = null,
-    on_chunk_extension_value: llhttp_data_cb = null,
-    on_headers_complete: llhttp_cb = null,
-    on_body: llhttp_data_cb = null,
-    on_message_complete: llhttp_cb = null,
-    on_url_complete: llhttp_cb = null,
-    on_status_complete: llhttp_cb = null,
-    on_method_complete: llhttp_cb = null,
-    on_version_complete: llhttp_cb = null,
-    on_header_field_complete: llhttp_cb = null,
-    on_header_value_complete: llhttp_cb = null,
-    on_chunk_extension_name_complete: llhttp_cb = null,
-    on_chunk_extension_value_complete: llhttp_cb = null,
-    on_chunk_header: llhttp_cb = null,
-    on_chunk_complete: llhttp_cb = null,
-    on_reset: llhttp_cb = null,
-};
+pub fn Zigllhttp(comptime Data: type) type {
+    return struct {
+        const Self = @This();
 
-pub extern fn llhttp_settings_init(settings: *const struct_llhttp_settings_s) void;
-pub extern fn llhttp_init(parser: *c.llhttp_t, @"type": c.llhttp_type_t, settings: *const struct_llhttp_settings_s) void;
-pub extern fn llhttp_execute(parser: *c.llhttp_t, data: [*c]const u8, len: usize) c.llhttp_errno_t;
+        data: Data,
+        c_settings: *c.struct_llhttp_settings_s,
+        parser: *c.llhttp_t,
 
-pub const LlhttpParser = struct {
-    parser: *c.llhttp_t,
+        pub fn init(data: Data, alloc: Allocator) !Self {
+            const dataInfo = @typeInfo(Data);
+            if (dataInfo != .Pointer) @compileError("data must be a pointer type");
 
-    @"error": *i32,
-    reason: [*c]const u8,
-    error_pos: [*c]const u8,
-    data: ?*anyopaque,
-    content_length: *u64,
-    type: *u8,
-    method: *u8,
-    http_major: *u8,
-    http_minor: *u8,
-    header_state: *u8,
-    lenient_flags: *u16,
-    upgrade: *u8,
-    finish: *u8,
-    flags: *u16,
-    status_code: *u16,
-    initial_message_completed: *u8,
+            const c_settings = try alloc.create(c.struct_llhttp_settings_s);
+            const parser = try alloc.create(c.llhttp_t);
 
-    pub fn init(alloc: Allocator, settings: *const struct_llhttp_settings_s, parse_type: LlhttpParserType) !LlhttpParser {
-        const parser = try alloc.create(c.llhttp_t);
+            c.llhttp_settings_init(@ptrCast(c_settings));
 
-        llhttp_init(parser, @intFromEnum(parse_type), settings);
+            return .{
+                .data = data,
+                .c_settings = c_settings,
+                .parser = parser,
+            };
+        }
 
-        return .{
-            .parser = parser,
-            .@"error" = &parser.@"error",
-            .reason = parser.reason,
-            .error_pos = parser.error_pos,
-            .data = parser.data,
-            .content_length = &parser.content_length,
-            .type = &parser.type,
-            .method = &parser.method,
-            .http_major = &parser.http_major,
-            .http_minor = &parser.http_minor,
-            .header_state = &parser.header_state,
-            .lenient_flags = &parser.lenient_flags,
-            .upgrade = &parser.upgrade,
-            .finish = &parser.finish,
-            .flags = &parser.flags,
-            .status_code = &parser.status_code,
-            .initial_message_completed = &parser.initial_message_completed,
-        };
-    }
+        pub fn add_data_callback(self: *Self, name: DataCallbacks, comptime callback: *const fn (Data, *const c.llhttp_t, [*]const u8, usize) c_int) void {
+            const CWrapper = struct {
+                pub fn wrapper(parser: [*c]const c.llhttp_t, data: [*c]const u8, size: usize) callconv(.C) c_int {
+                    return @call(.always_inline, callback, .{ @as(Data, @ptrCast(@alignCast(parser.*.data))), parser, data, size });
+                }
+            };
 
-    pub fn deinit(self: *LlhttpParser, alloc: Allocator) void {
-        alloc.destroy(self.parser);
-        self.* = undefined;
-    }
+            switch (name) {
+                .on_url => {
+                    self.c_settings.on_url = CWrapper.wrapper;
+                },
 
-    pub fn execute(self: LlhttpParser, request: []const u8) u32 {
-        return llhttp_execute(self.parser, request.ptr, request.len);
-    }
-};
+                .on_status => {
+                    self.c_settings.on_status = CWrapper.wrapper;
+                },
+
+                .on_method => {
+                    self.c_settings.on_method = CWrapper.wrapper;
+                },
+
+                .on_version => {
+                    self.c_settings.on_version = CWrapper.wrapper;
+                },
+
+                .on_header_field => {
+                    self.c_settings.on_header_field = CWrapper.wrapper;
+                },
+
+                .on_header_value => {
+                    self.c_settings.on_header_value = CWrapper.wrapper;
+                },
+
+                .on_chunk_extension_name => {
+                    self.c_settings.on_chunk_extension_name = CWrapper.wrapper;
+                },
+
+                .on_chunk_extension_value => {
+                    self.c_settings.on_chunk_extension_value = CWrapper.wrapper;
+                },
+
+                .on_body => {
+                    self.c_settings.on_body = CWrapper.wrapper;
+                },
+            }
+        }
+
+        pub fn add_callback(self: *Self, name: Callbacks, comptime callback: *const fn (Data, *const c.llhttp_t) c_int) void {
+            const CWrapper = struct {
+                pub fn wrapper(parser: [*c]const c.llhttp_t) callconv(.C) c_int {
+                    return @call(.always_inline, callback, .{ @as(Data, @ptrCast(@alignCast(parser.*.data))), parser });
+                }
+            };
+
+            switch (name) {
+                .on_message_begin => {
+                    self.c_settings.on_message_begin = CWrapper.wrapper;
+                },
+
+                .on_headers_complete => {
+                    self.c_settings.on_headers_complete = CWrapper.wrapper;
+                },
+
+                .on_message_complete => {
+                    self.c_settings.on_message_complete = CWrapper.wrapper;
+                },
+
+                .on_url_complete => {
+                    self.c_settings.on_url_complete = CWrapper.wrapper;
+                },
+
+                .on_status_complete => {
+                    self.c_settings.on_status_complete = CWrapper.wrapper;
+                },
+
+                .on_method_complete => {
+                    self.c_settings.on_method_complete = CWrapper.wrapper;
+                },
+
+                .on_version_complete => {
+                    self.c_settings.on_version_complete = CWrapper.wrapper;
+                },
+
+                .on_header_field_complete => {
+                    self.c_settings.on_header_field_complete = CWrapper.wrapper;
+                },
+
+                .on_header_value_complete => {
+                    self.c_settings.on_header_value_complete = CWrapper.wrapper;
+                },
+
+                .on_chunk_extension_name_complete => {
+                    self.c_settings.on_chunk_extension_name_complete = CWrapper.wrapper;
+                },
+
+                .on_chunk_extension_value_complete => {
+                    self.c_settings.on_chunk_extension_value_complete = CWrapper.wrapper;
+                },
+
+                .on_chunk_header => {
+                    self.c_settings.on_chunk_header = CWrapper.wrapper;
+                },
+
+                .on_chunk_complete => {
+                    self.c_settings.on_chunk_complete = CWrapper.wrapper;
+                },
+
+                .on_reset => {
+                    self.c_settings.on_reset = CWrapper.wrapper;
+                },
+            }
+        }
+
+        pub fn parse(self: *Self, parse_type: LlhttpParserType, data: []const u8) u32 {
+            c.llhttp_init(self.parser, @intFromEnum(parse_type), self.c_settings);
+            self.parser.*.data = @ptrCast(@alignCast(self.data));
+
+            return c.llhttp_execute(self.parser, data.ptr, data.len);
+        }
+
+        pub fn deinit(self: *Self, alloc: Allocator) void {
+            alloc.destroy(self.c_settings);
+            alloc.destroy(self.parser);
+            self.* = undefined;
+        }
+    };
+}
